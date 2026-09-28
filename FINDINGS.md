@@ -10,7 +10,7 @@ Status legend: yes / yes-with-caveats / no / needs-owner-input / PENDING
 | 1 | Image with Claude Code; `claude --version` works | **yes** |
 | 2 | Sandbox shape: only scratch workspace, no creds/env leakage | **yes** (network is separate — see Q3) |
 | 3 | Egress allowlist | **yes** — `--internal` network + allowlisting CONNECT proxy sidecar |
-| 4 | Write effects: RO inputs, RW declared output | PENDING |
+| 4 | Write effects: RO inputs, RW declared output | **yes** |
 | 5 | asyncio supervisor, stream-json, cancel cleanly incl. container | PENDING |
 | 6 | `--bare` and auth on host; settings/MCP/memory controls | PENDING |
 | 7 | Auth inside container — options only | PENDING |
@@ -164,8 +164,37 @@ Caveats:
 - Proxy is one extra container per run (~8 MB alpine image, starts in <1 s). Could be one shared proxy with per-source-IP allowlists, but per-run is simpler and matches "effects are per actor".
 - Blocked egress shows up in stream-json as `api_retry` events then a final result with `is_error: true` and a clear `ERR_PROXY_TUNNEL` message — see Q8 on retries.
 
-## Q4
-PENDING
+## Q4 — Write effects
+
+**Answer: yes.** Declared inputs → `-v src:dst:ro`; declared outputs → `-v src:dst:rw`; everything else is the `--read-only` root fs (denied) or a tmpfs (`/tmp`, `$HOME`) that is discarded at exit. **Nested `:ro` mounts over a `:rw` mount work**, so "may edit the repo but not `.git/` or `.claude/`" is expressible — useful because `.git/hooks` and `.claude/settings.json` are code-execution vectors for the *next* process that touches the repo (including the host).
+
+**Demo:** `demos/q4_write_effects.sh` (runs with `--network none`, uid 1000).
+
+```
+read input: spec
+WRITE OK     : /out/result.txt        (declared output)
+WRITE OK     : /workspace/src/b.py    (declared rw repo)
+WRITE DENIED : /inputs/spec.md        (input, ro)
+WRITE DENIED : rm /inputs/spec.md     (input, ro)
+WRITE DENIED : /workspace/.git/hooks/pre-commit (nested ro)
+WRITE DENIED : /workspace/.claude/settings.json (nested ro)
+WRITE DENIED : /etc/passwd            (root fs)
+WRITE DENIED : /usr/local/bin/claude  (root fs)
+WRITE DENIED : /opt/new               (root fs)
+WRITE OK     : /tmp/scratch           (ephemeral tmpfs, discarded)
+host view after run:
+./inputs/spec.md
+./out/result.txt
+./repo/src/a.py
+./repo/src/b.py
+```
+
+Caveats:
+- **Docker Desktop (macOS) does not enforce host file permissions** on bind mounts: a container uid 1000 wrote into a host dir with mode `0700` owned by the Mac user, and files land owned by the Mac user (virtiofs maps everything to the host user). So on macOS the `:ro` flag is the *only* write control — host perms/uid mismatch is no defence. On a Linux host uids are real and the actor uid must be able to write declared outputs (plan for `--user $(id -u):$(id -g)` or chown).
+- Effects are mount-granular (directories or single files). A declared effect like "may write `src/**/*.py` but not `src/secrets/`" needs either nested ro mounts or a post-run diff check. Recommend troupe declares effects as path prefixes and a post-run `git status`/diff audit produces the event of record anyway (exit 0 ≠ work happened).
+- `/tmp` and `$HOME` are writable but ephemeral; they are not "outputs". If an actor genuinely needs a cache (e.g. `~/.cache/uv`) that's an explicit declared mount.
+- Mounting a single file (not dir) `:ro` works but editors that write-via-rename will fail on it — fine for inputs.
+
 ## Q5
 PENDING
 ## Q6

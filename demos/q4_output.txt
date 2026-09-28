@@ -1,0 +1,16 @@
+read input: spec
+WRITE OK     : /out/result.txt        (declared output)
+WRITE OK     : /workspace/src/b.py    (declared rw repo)
+WRITE DENIED : /inputs/spec.md        (input, ro)
+WRITE DENIED : rm /inputs/spec.md     (input, ro)
+WRITE DENIED : /workspace/.git/hooks/pre-commit (nested ro)
+WRITE DENIED : /workspace/.claude/settings.json (nested ro)
+WRITE DENIED : /etc/passwd            (root fs)
+WRITE DENIED : /usr/local/bin/claude  (root fs)
+WRITE DENIED : /opt/new               (root fs)
+WRITE OK     : /tmp/scratch           (ephemeral tmpfs, discarded)
+host view after run:
+./inputs/spec.md
+./out/result.txt
+./repo/src/a.py
+./repo/src/b.py
