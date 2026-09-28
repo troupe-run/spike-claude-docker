@@ -9,7 +9,7 @@ Status legend: yes / yes-with-caveats / no / needs-owner-input / PENDING
 |---|---|---|
 | 1 | Image with Claude Code; `claude --version` works | **yes** |
 | 2 | Sandbox shape: only scratch workspace, no creds/env leakage | **yes** (network is separate — see Q3) |
-| 3 | Egress allowlist | PENDING |
+| 3 | Egress allowlist | **yes** — `--internal` network + allowlisting CONNECT proxy sidecar |
 | 4 | Write effects: RO inputs, RW declared output | PENDING |
 | 5 | asyncio supervisor, stream-json, cancel cleanly incl. container | PENDING |
 | 6 | `--bare` and auth on host; settings/MCP/memory controls | PENDING |
@@ -106,8 +106,64 @@ Notes / caveats:
 - `$HOME` as tmpfs means Claude Code's `~/.claude.json` / session transcripts are ephemeral per run — good for isolation, and means **session transcripts are lost** unless troupe captures stream-json (it should — that's the event source anyway) or mounts a per-run `~/.claude/projects` dir.
 - **Network is NOT restricted by this shape**: the default bridge reaches the internet and `host.docker.internal` (the Mac host). See Q3.
 
-## Q3
-PENDING
+## Q3 — Network effects (egress allowlist)
+
+**Answer: yes.** Recommended approach: **per-run `docker network create --internal` network + an allowlisting forward-proxy sidecar** (tinyproxy, default-deny host regex list) that is attached to both the internal network and the normal bridge. The actor container is only on the internal network and gets `HTTPS_PROXY=http://egress:3128`. Claude Code honours `HTTPS_PROXY` (verified: its traffic appears in the proxy log and its error message names the proxy).
+
+**Demo:** `demos/q3_egress.sh` (proxy image: `proxy/Dockerfile`, `proxy/tinyproxy.conf`). Allowlist file is mounted into the proxy per run = the actor's declared hosts.
+
+Output (`demos/q3_output.txt`):
+```
+--- allowed host via proxy (expect a real HTTP status from api.anthropic.com, e.g. 404/401/405)
+curl https://api.anthropic.com/: HTTP 404 exit=0
+--- disallowed host via proxy (expect proxy refusal: 403 on CONNECT -> curl exit 56, HTTP 000)
+curl https://example.com/: HTTP 000 exit=56
+--- bypass attempt: ignore proxy, go direct (expect no route: exit 6/7/28)
+curl --noproxy * https://example.com/: HTTP 000 exit=6
+curl --noproxy * https://1.1.1.1/: HTTP 000 exit=7
+--- bypass attempt: Mac host via host.docker.internal (expect failure)
+curl --noproxy * http://host.docker.internal:80/: HTTP 000 exit=6
+--- DNS from inside internal network (does external name resolution work? = DNS exfil channel)
+no external DNS
+--- claude itself through the proxy (bogus API key, --bare; expect 401 from Anthropic = reached API)
+result: {'subtype': 'success', 'is_error': True, 'result': 'Failed to authenticate. API Error: 401 API key is invalid.'}
+--- claude with allowlist that does NOT include api.anthropic.com (expect proxy tunnel error)
+result: {'subtype': 'success', 'is_error': True, 'result': "API Error: Couldn't connect through your proxy (ERR_PROXY_TUNNEL) — the proxy refused the tunnel: check its credentials and that it allows this host"}
+--- proxy log (CONNECT decisions)
+Sep 28 11:41:44.964 [1]: Connect (file descriptor 4): 172.23.0.3
+Sep 28 11:41:44.964 [1]: Request (file descriptor 4): CONNECT api.anthropic.com:443 HTTP/1.1
+Sep 28 11:41:44.964 [1]: Proxying refused on filtered domain "api.anthropic.com"
+Sep 28 11:41:53.013 [1]: Connect (file descriptor 4): 172.23.0.3
+Sep 28 11:41:53.013 [1]: Request (file descriptor 4): CONNECT api.anthropic.com:443 HTTP/1.1
+Sep 28 11:41:53.013 [1]: Proxying refused on filtered domain "api.anthropic.com"
+Sep 28 11:41:54.133 [1]: Connect (file descriptor 4): 172.23.0.3
+Sep 28 11:41:54.133 [1]: Request (file descriptor 4): CONNECT api.anthropic.com:443 HTTP/1.1
+Sep 28 11:41:54.133 [1]: Proxying refused on filtered domain "api.anthropic.com"
+Sep 28 11:41:54.214 [1]: Connect (file descriptor 4): 172.23.0.3
+Sep 28 11:41:54.214 [1]: Request (file descriptor 4): CONNECT api.anthropic.com:443 HTTP/1.1
+Sep 28 11:41:54.214 [1]: Proxying refused on filtered domain "api.anthropic.com"
+```
+
+(The trailing proxy-log lines are from the second claude run, where `api.anthropic.com` was deliberately removed from the allowlist. The 401 in the first claude run is from Anthropic's API for a deliberately bogus key — proof the request got there; no real credential was used.)
+
+What Claude Code genuinely needs (observed via proxy log, `--bare`, API-key mode):
+- **`api.anthropic.com:443` only** — for the Messages call *and* startup fetches ("remote settings", "policy limits" — both on api.anthropic.com).
+- With `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` **unset**, it additionally tries `http-intake.logs.us5.datadoghq.com` (telemetry). With it set (baked into the image), nothing else. Blocking telemetry does not break the run.
+- Not observed (because never exercised): OAuth token refresh endpoints (OAuth-mode runs — Q7, unverified), `downloads.claude.ai` (autoupdater, disabled), WebFetch/WebSearch targets, MCP servers, `git`/package registries the *work* may need. Those are per-actor declared hosts.
+
+Why this approach over the alternatives:
+- **`--internal` network gives the hard guarantee** (no route; also no external DNS — confirmed `getent hosts example.com` fails, so no DNS exfil channel, and `host.docker.internal` does not resolve). The proxy is only the *allow* path. Even if the actor ignores `HTTPS_PROXY` (`curl --noproxy '*'`) it gets nowhere.
+- `--network none` + proxy: cleanest isolation, but then the proxy has to be reached through a unix socket bind-mount plus an in-container TCP relay (socat) because Claude Code wants an HTTP proxy URL. More moving parts, same result. Viable fallback.
+- iptables inside the actor container needs `NET_ADMIN` (contradicts `--cap-drop ALL`) and is DNS-fragile (IP allowlists for CDN-fronted hosts). Rejected.
+- Docker Desktop on macOS gives no host-level per-container firewall. Rejected.
+
+Caveats:
+- CONNECT filtering is by **hostname**, not TLS-inspected. It cannot stop exfiltration *to an allowed host* — in particular the model conversation with api.anthropic.com is itself a channel. That is inherent to running an LLM agent; the allowlist bounds *where else* data can go.
+- tinyproxy regexes are ERE; anchor them (`^api\.anthropic\.com$`). Unanchored patterns would allow `api.anthropic.com.evil.tld`.
+- Plain-HTTP (non-CONNECT) requests are also filtered by host, but `ConnectPort 443` means CONNECT to other ports is refused — declare non-443 needs explicitly.
+- Proxy is one extra container per run (~8 MB alpine image, starts in <1 s). Could be one shared proxy with per-source-IP allowlists, but per-run is simpler and matches "effects are per actor".
+- Blocked egress shows up in stream-json as `api_retry` events then a final result with `is_error: true` and a clear `ERR_PROXY_TUNNEL` message — see Q8 on retries.
+
 ## Q4
 PENDING
 ## Q5

@@ -1,0 +1,28 @@
+--- allowed host via proxy (expect a real HTTP status from api.anthropic.com, e.g. 404/401/405)
+curl https://api.anthropic.com/: HTTP 404 exit=0
+--- disallowed host via proxy (expect proxy refusal: 403 on CONNECT -> curl exit 56, HTTP 000)
+curl https://example.com/: HTTP 000 exit=56
+--- bypass attempt: ignore proxy, go direct (expect no route: exit 6/7/28)
+curl --noproxy * https://example.com/: HTTP 000 exit=6
+curl --noproxy * https://1.1.1.1/: HTTP 000 exit=7
+--- bypass attempt: Mac host via host.docker.internal (expect failure)
+curl --noproxy * http://host.docker.internal:80/: HTTP 000 exit=6
+--- DNS from inside internal network (does external name resolution work? = DNS exfil channel)
+no external DNS
+--- claude itself through the proxy (bogus API key, --bare; expect 401 from Anthropic = reached API)
+result: {'subtype': 'success', 'is_error': True, 'result': 'Failed to authenticate. API Error: 401 API key is invalid.'}
+--- claude with allowlist that does NOT include api.anthropic.com (expect proxy tunnel error)
+result: {'subtype': 'success', 'is_error': True, 'result': "API Error: Couldn't connect through your proxy (ERR_PROXY_TUNNEL) — the proxy refused the tunnel: check its credentials and that it allows this host"}
+--- proxy log (CONNECT decisions)
+Sep 28 11:41:44.964 [1]: Connect (file descriptor 4): 172.23.0.3
+Sep 28 11:41:44.964 [1]: Request (file descriptor 4): CONNECT api.anthropic.com:443 HTTP/1.1
+Sep 28 11:41:44.964 [1]: Proxying refused on filtered domain "api.anthropic.com"
+Sep 28 11:41:53.013 [1]: Connect (file descriptor 4): 172.23.0.3
+Sep 28 11:41:53.013 [1]: Request (file descriptor 4): CONNECT api.anthropic.com:443 HTTP/1.1
+Sep 28 11:41:53.013 [1]: Proxying refused on filtered domain "api.anthropic.com"
+Sep 28 11:41:54.133 [1]: Connect (file descriptor 4): 172.23.0.3
+Sep 28 11:41:54.133 [1]: Request (file descriptor 4): CONNECT api.anthropic.com:443 HTTP/1.1
+Sep 28 11:41:54.133 [1]: Proxying refused on filtered domain "api.anthropic.com"
+Sep 28 11:41:54.214 [1]: Connect (file descriptor 4): 172.23.0.3
+Sep 28 11:41:54.214 [1]: Request (file descriptor 4): CONNECT api.anthropic.com:443 HTTP/1.1
+Sep 28 11:41:54.214 [1]: Proxying refused on filtered domain "api.anthropic.com"
