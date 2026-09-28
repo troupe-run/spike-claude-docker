@@ -1,0 +1,30 @@
+### A) env var (-e CLAUDE_CODE_OAUTH_TOKEN; value from supervisor env, not argv)
+  docker inspect Env has token: 1
+  docker inspect Mounts: /probe_hook.sh:ro 
+  [child] own env has token: 0
+  [child] own inherited fds: 0->socket:[9936814] 1->/tmp/probe.txt 10->/probe_hook.sh 11->socket:[9936817] 2->socket:[9936819] 3->pipe:[9940481] 
+  [child] can read /proc/<claude>/environ token: 1
+  [child] claude's fds: 0->/dev/null 1->/dev/null 10->anon_inode:[eventfd] 11->anon_inode:[eventpoll] 12->anon_inode:[eventfd] 13->socket:[9936802] 14->anon_inode:inotify 19->socket:[9936816] 2->/dev/null 23->socket:[9936818] 25->anon_inode:[pidfd] 3->anon_inode:[eventpoll] 4->anon_inode:[eventfd] 5->/dev/urandom 6->/proc/8/statm 7->/dev/null 8->/dev/null 9->anon_inode:[eventpoll] 
+  [child] can read token via /proc/<claude>/fd/*: 0 fd(s)
+  [child] secret file /run/secrets/token readable: no/absent
+  fake API saw Bearer matching bogus token: 1 request(s)
+### B) secret file bind-mounted ro, wrapper opens it as fd 3, exports only the fd number
+  docker inspect Env has token: 0
+  docker inspect Mounts: /probe_hook.sh:ro /run/secrets/token: 
+  [child] own env has token: 0
+  [child] own inherited fds: 0->socket:[9940559] 1->/tmp/probe.txt 10->/probe_hook.sh 11->socket:[9940562] 2->socket:[9940564] 3->pipe:[9940568] 
+  [child] can read /proc/<claude>/environ token: 0
+  [child] claude's fds: 0->/dev/null 1->/dev/null 10->anon_inode:[eventpoll] 11->anon_inode:[eventfd] 12->anon_inode:[eventpoll] 13->anon_inode:[eventfd] 14->socket:[9940547] 16->anon_inode:inotify 2->/dev/null 20->socket:[9940561] 24->socket:[9940563] 26->anon_inode:[pidfd] 3->/run/secrets/token 4->anon_inode:[eventpoll] 5->anon_inode:[eventfd] 6->/dev/urandom 7->/proc/9/statm 8->/dev/null 9->/dev/null 
+  [child] can read token via /proc/<claude>/fd/*: 1 fd(s)
+  [child] secret file /run/secrets/token readable: YES
+  fake API saw Bearer matching bogus token: 1 request(s)
+### C) token piped on stdin of docker run -i; wrapper turns it into fd 3 (never on disk/env)
+  [child] own env has token: 0
+  [child] own inherited fds: 0->socket:[9941334] 1->/tmp/probe.txt 10->/probe_hook.sh 11->socket:[9941337] 2->socket:[9941339] 3->pipe:[9940659] 
+  [child] can read /proc/<claude>/environ token: 0
+  [child] claude's fds: 0->/dev/null 1->/dev/null 10->anon_inode:[eventpoll] 11->anon_inode:[eventfd] 12->anon_inode:[eventpoll] 13->anon_inode:[eventfd] 14->socket:[9941322] 16->anon_inode:inotify 2->/dev/null 20->socket:[9941336] 24->socket:[9941338] 26->anon_inode:[pidfd] 3->pipe:[9939798] 4->anon_inode:[eventpoll] 5->anon_inode:[eventfd] 6->/dev/urandom 7->/proc/9/statm 8->/dev/null 9->/dev/null 
+  [child] can read token via /proc/<claude>/fd/*: 0 fd(s)
+  [child] secret file /run/secrets/token readable: no/absent
+error: no such object: q7c-55485
+  docker inspect Env has token: 0
+  fake API saw Bearer matching bogus token: 1 request(s)

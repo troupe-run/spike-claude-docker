@@ -1,0 +1,4 @@
+"result":"Failed to authenticate. API Error: 401 fake api"
+actor can see real token anywhere in its fs/env: 0 files, env=0
+fake API saw injected REAL token: 1 request(s); saw actor's dummy: 0
+paths: "path": "/v1/messages 
