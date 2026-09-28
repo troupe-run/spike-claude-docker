@@ -1,0 +1,14 @@
+##### auth env: CLAUDE_CODE_OAUTH_TOKEN (bogus value)
+default (-p)                                 markers=[hook_promptsubmit hook_sessionstart mcp_started ] tools=21 mcp=['evil:pending'] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+--bare                                       markers=[] tools=3 mcp=[] | result='Not logged in · Please run /login'
+--setting-sources user --strict-mcp-config   markers=[] tools=21 mcp=[] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+--setting-sources '' --strict-mcp-config     markers=[] tools=21 mcp=[] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+--safe-mode                                  markers=[] tools=21 mcp=[] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+--restricted --strict-mcp-config             markers=[] tools=19 mcp=[] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+##### auth env: ANTHROPIC_API_KEY (bogus value)
+default (-p)                                 markers=[hook_promptsubmit hook_sessionstart mcp_started ] tools=21 mcp=['evil:pending'] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+--bare                                       markers=[] tools=3 mcp=[] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+--setting-sources user --strict-mcp-config   markers=[] tools=21 mcp=[] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+--setting-sources '' --strict-mcp-config     markers=[] tools=21 mcp=[] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+--safe-mode                                  markers=[] tools=21 mcp=[] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+--restricted --strict-mcp-config             markers=[] tools=19 mcp=[] | result="API Error: Can't reach the API server — check your internet or DNS (EA"

@@ -12,7 +12,7 @@ Status legend: yes / yes-with-caveats / no / needs-owner-input / PENDING
 | 3 | Egress allowlist | **yes** — `--internal` network + allowlisting CONNECT proxy sidecar |
 | 4 | Write effects: RO inputs, RW declared output | **yes** |
 | 5 | asyncio supervisor, stream-json, cancel cleanly incl. container | **yes-with-caveats** (must target the container, not just the CLI) |
-| 6 | `--bare` and auth on host; settings/MCP/memory controls | PENDING |
+| 6 | `--bare` and auth on host; settings/MCP/memory controls | **yes** — prior-art claim confirmed; and there are OAuth-compatible alternatives |
 | 7 | Auth inside container — options only | PENDING |
 | 8 | Surprises / prior-art corrections | PENDING |
 
@@ -244,8 +244,71 @@ What differs for real claude vs the stand-in (beyond the above):
 - Session transcripts live in the tmpfs `$HOME` and vanish; stream-json captured by the supervisor is the only record (by design).
 - Useful stream-json events for supervision seen in this spike: `system/init` (tools, model, mcp_servers, permissionMode — record it), `system/api_retry` (`attempt`, `max_retries`, `error_status`, `error`: e.g. `authentication_failed`), final `result` (`is_error`, `result`, `total_cost_usd`).
 
-## Q6
-PENDING
+## Q6 — `--bare`, auth, and config-source controls
+
+**Answer: prior-art claim CONFIRMED.** `--bare` does block the target repo's hooks, `.mcp.json` servers and CLAUDE.md — **and** it never reads OAuth credentials (neither the keychain login nor `CLAUDE_CODE_OAUTH_TOKEN`). New finding: **`--safe-mode` and `--setting-sources user --strict-mcp-config` give the same repo-isolation while still accepting OAuth**, so the security control and subscription auth are not mutually exclusive.
+
+### Evidence 1 — `claude --help` (2.1.281), verbatim
+> `--bare` Minimal mode: skip hooks (those defined in settings and by installed plugins; ...), LSP, plugin sync, attribution, auto-memory, background prefetches, keychain reads, and CLAUDE.md auto-discovery. Sets CLAUDE_CODE_SIMPLE=1. **Anthropic auth is strictly ANTHROPIC_API_KEY or apiKeyHelper via --settings (OAuth and keychain are never read).** ... Explicitly provide context via: --system-prompt[-file], --append-system-prompt[-file], --add-dir (CLAUDE.md dirs), --mcp-config, --settings, --agents, --plugin-dir.
+
+### Evidence 2 — one host invocation (logged in via claude.ai OAuth, Max subscription; no `ANTHROPIC_API_KEY` in env)
+```
+$ claude auth status --json   # fields other than these redacted
+{'loggedIn': True, 'authMethod': 'claude.ai', 'apiProvider': 'firstParty', 'subscriptionType': 'max', ...}
+$ CLAUDE_CODE_MAX_RETRIES=0 claude -p --bare --no-session-persistence --max-budget-usd 0.01 --output-format json 'say hi'
+{'subtype': 'success', 'is_error': True, 'result': 'Not logged in · Please run /login', 'total_cost_usd': 0, 'num_turns': 1, 'duration_api_ms': 0}
+```
+Zero cost, no API call. This was the only host-side `claude -p` call in the spike.
+
+### Evidence 3 — hostile-repo matrix, in the container, no network, bogus credentials (`demos/q6_config_sources.sh`)
+Target repo has `.claude/settings.json` with SessionStart + UserPromptSubmit hooks that `touch` marker files and `"enableAllProjectMcpServers": true`, a `.mcp.json` server that touches a marker, and a CLAUDE.md. Hooks and MCP start *before* any API call, so markers prove execution without auth.
+```
+##### auth env: CLAUDE_CODE_OAUTH_TOKEN (bogus value)
+default (-p)                                 markers=[hook_promptsubmit hook_sessionstart mcp_started ] tools=21 mcp=['evil:pending'] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+--bare                                       markers=[] tools=3 mcp=[] | result='Not logged in · Please run /login'
+--setting-sources user --strict-mcp-config   markers=[] tools=21 mcp=[] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+--setting-sources '' --strict-mcp-config     markers=[] tools=21 mcp=[] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+--safe-mode                                  markers=[] tools=21 mcp=[] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+--restricted --strict-mcp-config             markers=[] tools=19 mcp=[] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+##### auth env: ANTHROPIC_API_KEY (bogus value)
+default (-p)                                 markers=[hook_promptsubmit hook_sessionstart mcp_started ] tools=21 mcp=['evil:pending'] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+--bare                                       markers=[] tools=3 mcp=[] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+--setting-sources user --strict-mcp-config   markers=[] tools=21 mcp=[] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+--setting-sources '' --strict-mcp-config     markers=[] tools=21 mcp=[] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+--safe-mode                                  markers=[] tools=21 mcp=[] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+--restricted --strict-mcp-config             markers=[] tools=19 mcp=[] | result="API Error: Can't reach the API server — check your internet or DNS (EA"
+```
+Evidence 4 — does the repo's CLAUDE.md reach the model? Fake API endpoint via `ANTHROPIC_BASE_URL` records the request body (`demos/q6_claude_md.sh`, `demos/fake_api.py`):
+```
+[default]                                    requests-with-CLAUDE.md=1  endpoints=['/v1/messages']
+[--bare]                                     requests-with-CLAUDE.md=0  endpoints=['/v1/messages']
+[--safe-mode]                                requests-with-CLAUDE.md=0  endpoints=['/v1/messages']
+[--setting-sources user --strict-mcp-config] requests-with-CLAUDE.md=0  endpoints=['/v1/messages']
+[--bare --add-dir /workspace]                requests-with-CLAUDE.md=1  endpoints=['/v1/messages']
+```
+
+Takeaways:
+- **Plain `claude -p` in an untrusted repo executes that repo's hooks and MCP servers** — including a repo that self-approves its MCP servers via `enableAllProjectMcpServers` in its own project settings. `-p` skips the workspace-trust dialog (the help says so). This is the real hazard the prior art was guarding against; confirmed.
+- `--bare`: nothing runs, CLAUDE.md not sent, **tools shrink to `Bash, Edit, Read`** (no `Write`, `WebFetch`, `Task`, …; `--tools Read,Write,...` does *not* restore them under `--bare`). OAuth rejected ("Not logged in"). Context must be passed explicitly (`--add-dir` re-enables CLAUDE.md from that dir — shown above).
+- `--safe-mode`: nothing from the repo runs or is sent, full tool set, auth "works normally" per help (OAuth env accepted — got as far as the network).
+- `--setting-sources user --strict-mcp-config`: same isolation for *project/local* settings + MCP, and project CLAUDE.md is not sent either. `--setting-sources ''` (empty) is accepted too. In the container, "user" settings = the tmpfs `$HOME`, i.e. empty, unless troupe provides one.
+- `--restricted --strict-mcp-config`: isolation + drops code-running tools (19 tools) + confines file tools to working dirs. Too restrictive for a coding actor, interesting for review-only actors.
+
+### Control surface (flags / env vars found in `--help` and the 2.1.281 binary)
+| Concern | Control |
+|---|---|
+| Settings sources | `--setting-sources user,project,local` (subset or `''`), `--settings <file|json>` (additive), `--bare`, `--safe-mode` (`CLAUDE_CODE_SAFE_MODE=1`), `--restricted`, managed settings (`CLAUDE_CODE_MANAGED_SETTINGS_PATH`) still apply in all modes |
+| MCP | `--mcp-config <files|json>`, `--strict-mcp-config` (ignore all other MCP config), `CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS` |
+| Memory | `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (prior art: confirmed the var exists), `CLAUDE_CODE_DISABLE_ORG_MEMORY`; `--bare` disables auto-memory; CLAUDE.md discovery off under `--bare`/`--safe-mode`/`--setting-sources` without `project` |
+| Config dir | `CLAUDE_CONFIG_DIR` (host session here uses `~/.claude-troupe`) |
+| Retries | `CLAUDE_CODE_MAX_RETRIES` (default 10 — see Q8) |
+| Budget / turns | `--max-budget-usd` (print mode). No `--max-turns` flag in 2.1.281 help. |
+| Traffic | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `DISABLE_AUTOUPDATER=1` |
+| Permission prompts in -p | `--permission-mode`, `--permission-prompts none` (anything that would prompt is auto-denied), `--allowedTools/--disallowedTools/--tools` |
+| Auth | `ANTHROPIC_API_KEY`, `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `apiKeyHelper` (settings), `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` |
+
+Caveats: env var names were found by `strings` on the binary, not all are documented — treat undocumented ones as unstable. `--safe-mode`'s OAuth acceptance was shown with a bogus token reaching the network stage, not with a real login.
+
 ## Q7
 PENDING
 ## Q8

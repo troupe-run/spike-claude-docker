@@ -1,0 +1,5 @@
+[default]                                    requests-with-CLAUDE.md=1  endpoints=['/v1/messages']
+[--bare]                                     requests-with-CLAUDE.md=0  endpoints=['/v1/messages']
+[--safe-mode]                                requests-with-CLAUDE.md=0  endpoints=['/v1/messages']
+[--setting-sources user --strict-mcp-config] requests-with-CLAUDE.md=0  endpoints=['/v1/messages']
+[--bare --add-dir /workspace]                requests-with-CLAUDE.md=1  endpoints=['/v1/messages']
