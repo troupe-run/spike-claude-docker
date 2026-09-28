@@ -1,0 +1,26 @@
+============================= test session starts ==============================
+collecting ... collected 7 items
+
+tests/test_supervisor.py::test_streams_lines_bigger_than_64k_and_cancels_gracefully 
+  lines=8 big_line_len=200000 how=graceful rc=143 elapsed=1.1s last={'type': 'system', 'subtype': 'sigterm_received'}
+PASSED
+tests/test_supervisor.py::test_hard_cancel_when_actor_ignores_sigterm 
+  how=hard rc=137 elapsed=5.1s ticks=24
+PASSED
+tests/test_supervisor.py::test_without_init_pid1_ignores_sigterm 
+  without --init: hard   with --init: graceful
+PASSED
+tests/test_supervisor.py::test_killing_only_the_docker_cli_orphans_the_container 
+  container alive after killpg(docker CLI): True; swept by label: 1
+PASSED
+tests/test_supervisor.py::test_sigterm_to_docker_cli_is_proxied 
+  rc=143 container alive=False
+PASSED
+tests/test_supervisor.py::test_default_64k_reader_limit_breaks_on_big_line 
+  default limit: ValueError: Separator is not found, and chunk exceed the limit
+PASSED
+tests/test_supervisor.py::test_real_claude_cancels_gracefully_while_retrying 
+  how=graceful rc=143 elapsed=19.8s events=[('system', 'init'), ('system', 'api_retry'), ('system', 'api_retry'), ('system', 'api_retry')]
+PASSED
+
+============================== 7 passed in 39.55s ==============================
