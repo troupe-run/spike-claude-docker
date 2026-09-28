@@ -393,7 +393,7 @@ Open owner questions:
 | Exit 0 is not evidence the work happened | **Confirmed, and worse**: failures report `"subtype": "success"` with `"is_error": true`. Check `is_error` + verify the effect | Q3/Q6 result events |
 | asyncio subprocess, `start_new_session=True`, `killpg` | **Necessary but NOT sufficient in Docker**: killing the `docker run` CLI orphans the container | `test_killing_only_the_docker_cli_orphans_the_container` |
 | Raise the 64 KiB stream reader limit | **Confirmed** (`ValueError` at default) | `test_default_64k_reader_limit_breaks_on_big_line` |
-| `--output-format stream-json --verbose` | **Confirmed** (stream-json requires `--verbose` in `-p`) | all demos |
+| `--output-format stream-json --verbose` | **Confirmed** (verified: `Error: When using --print, --output-format=stream-json requires --verbose`) | all demos |
 | Blocked tools silently don't run | **Not tested** (needs a real model turn). Mitigations exist: `--permission-prompts none` makes would-prompt tools deny deterministically; verify effects post-run | — |
 | *Implied*: `--bare` is the way to get the security control | **Refined**: `--safe-mode` or `--setting-sources '' --strict-mcp-config` give the same repo isolation *and* keep OAuth and the full tool set | Q6 |
 
@@ -414,4 +414,46 @@ Open owner questions:
 14. The `system/init` event is rich (tools, mcp_servers with status, model, permissionMode, apiKeySource, plugins, skills, claude_code_version) — worth recording as the first event of every run for auditability.
 
 ## RECOMMENDATION
-PENDING
+
+**Feasible.** Docker is a workable first "stage" for a Claude Code executor: every declared effect in scope maps onto `docker run` flags, supervision is clean if cancellation targets the container, and the only genuinely open decision is the credential.
+
+### Image
+- `debian:bookworm-slim` + `ca-certificates curl git procps`; **native installer, version pinned** (`install.sh <VERSION>`) in a builder stage; copy the single binary to `/usr/local/bin/claude`. ~453 MB of content.
+- Bake `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `DISABLE_AUTOUPDATER=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. Tag images by Claude Code version; upgrading is a rebuild, recorded in the event log.
+
+### Egress
+- Per run: `docker network create --internal troupe-<run>`; actor joins only that network.
+- Allowlisting CONNECT proxy sidecar (tinyproxy, default-deny, anchored host regexes from the actor's declared hosts) bridged to the outside; actor gets `HTTPS_PROXY`/`HTTP_PROXY`. Baseline allowlist: `^api\.anthropic\.com$`.
+- The internal network is the enforcement (no route, no external DNS, no `host.docker.internal`); the proxy is only the allow path and the audit log (every CONNECT decision → event).
+- If auth option (d) is adopted, the auth injector becomes the Anthropic path and the CONNECT proxy only carries the actor's *other* declared hosts.
+
+### Declared effects → `docker run` flags
+| Effect | Flags |
+|---|---|
+| Baseline (always) | `--rm --init --name troupe-<run> --label run.troupe=<run> --read-only --tmpfs /tmp --tmpfs /home/actor:uid=1000,gid=1000 --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --pids-limit N` (+ `--memory`/`--cpus`) ; stdin `-i` only for credential hand-off |
+| reads: path | `-v host:ctr:ro` |
+| writes: path | `-v host:ctr:rw` |
+| writes: repo except protected subpaths | `-v repo:/workspace:rw -v repo/.git:/workspace/.git:ro -v repo/.claude:/workspace/.claude:ro` (nested ro) |
+| network: none | `--network none` |
+| network: hosts [..] | `--network troupe-<run>` (internal) + proxy sidecar allowlist + `-e HTTPS_PROXY=…` |
+| env: explicit names only | `-e NAME` for each declared name; never pass-through; never credentials |
+| exec in tmp | `--tmpfs /tmp:exec` only if declared |
+
+Plus Claude-level flags: `--setting-sources '' --strict-mcp-config` (or `--safe-mode`; `--bare` only with API-key auth and if the reduced toolset is acceptable), explicit `--mcp-config`/`--append-system-prompt`/`--add-dir` for context troupe *chooses* to give, `--permission-mode` + `--permission-prompts none`, `--model`, `--max-budget-usd`, `--no-session-persistence`, `--output-format stream-json --verbose`, `CLAUDE_CODE_MAX_RETRIES=2`. Prompt right after `-p` (or on stdin).
+
+### Supervision
+- asyncio `create_subprocess_exec(docker run …, start_new_session=True, limit=64 MiB)`, read stream-json line by line, each line → event.
+- Cancel = `docker stop -t <grace> <name>` → if still present `docker rm -f` → reap/`killpg` the local CLI. Requires `--init`.
+- On supervisor start: sweep containers with the troupe label that the event log doesn't show as live.
+- Outcome is derived, not trusted: `result.is_error`, absence of `result` (cancelled/crashed), `api_retry` with `authentication_failed` → fail fast, and a post-run **effect audit** (diff of declared write paths) as the event of record. Exit code and `subtype` are not evidence.
+
+### Auth (needs owner decision)
+- **Target: option (d), credential-injecting sidecar.** The only option where a prompt-injected actor cannot read the credential (measured: actor sees nothing; API receives the injected token). Works with either a subscription token or an API key. Cost: one small service that must do TLS + SSE streaming properly; natural place for per-run spend caps and usage events.
+- **Interim / first real test: option (a') — `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`, handed over stdin → fd (`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`)**, as in `run_authenticated.sh`. Keeps the token out of `docker inspect`, `ps`, env and disk; a malicious actor could still dig it out of process memory. Acceptable for a single owner running their own trusted prompts on their own repos; not for untrusted inputs.
+- **API key (c)** is the better long-term credential for automation (per-key revocation and spend limits, works with `--bare`); pair it with (d).
+- **Avoid (b)** file-based credentials: the macOS login is in the Keychain (no file to mount), extraction exposes refresh tokens, and Docker Desktop won't protect the file from the actor.
+
+### What is verified vs not
+- **Verified by running:** Q1 image; Q2 isolation; Q3 egress allow/deny/bypass/DNS incl. claude's own traffic via the proxy; Q4 ro/rw/nested mounts; Q5 supervisor + cancellation (stand-in and real claude), orphan pitfall, `--init`, 64 KiB; Q6 `--bare` behaviour (host + container), hostile-repo isolation matrix, CLAUDE.md inclusion via fake API; Q7 injection mechanics with bogus tokens, fake API, and injector sidecar.
+- **Not verified (need a real credential):** an actual model turn in the container (tool use, file writes by claude, permission behaviour, "blocked tools silently don't run"); which extra hosts OAuth-mode needs (token refresh/profile); OAuth token through the injector against the real API; SSE streaming through a production injector; `run_authenticated.sh` itself (deliberately not run).
+
