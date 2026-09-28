@@ -11,7 +11,7 @@ Status legend: yes / yes-with-caveats / no / needs-owner-input / PENDING
 | 2 | Sandbox shape: only scratch workspace, no creds/env leakage | **yes** (network is separate — see Q3) |
 | 3 | Egress allowlist | **yes** — `--internal` network + allowlisting CONNECT proxy sidecar |
 | 4 | Write effects: RO inputs, RW declared output | **yes** |
-| 5 | asyncio supervisor, stream-json, cancel cleanly incl. container | PENDING |
+| 5 | asyncio supervisor, stream-json, cancel cleanly incl. container | **yes-with-caveats** (must target the container, not just the CLI) |
 | 6 | `--bare` and auth on host; settings/MCP/memory controls | PENDING |
 | 7 | Auth inside container — options only | PENDING |
 | 8 | Surprises / prior-art corrections | PENDING |
@@ -195,8 +195,55 @@ Caveats:
 - `/tmp` and `$HOME` are writable but ephemeral; they are not "outputs". If an actor genuinely needs a cache (e.g. `~/.cache/uv`) that's an explicit declared mount.
 - Mounting a single file (not dir) `:ro` works but editors that write-via-rename will fail on it — fine for inputs.
 
-## Q5
-PENDING
+## Q5 — Supervision
+
+**Answer: yes-with-caveats.** An asyncio supervisor streams stream-json lines (incl. >64 KiB lines) and cancels graceful-then-hard with **no orphaned containers** — *provided cancellation is aimed at the container* (`docker stop -t <grace>` → `docker rm -f`), not only at the local `docker run` process. Verified against a stand-in **and against real `claude -p`** (no credentials needed: `--network none` + bogus key keeps claude alive in its retry backoff, which is a genuine long-running claude to cancel).
+
+**Demo:** `src/spike_claude_docker/supervisor.py`, `tests/test_supervisor.py`, `tests/standin.sh`. Run `uv run pytest -v -s tests/test_supervisor.py`. Every test has an autouse fixture that fails if any labelled container is left over; `docker ps -a --filter label=run.troupe.spike -q | wc -l` → `0` after the suite.
+
+```
+============================= test session starts ==============================
+collecting ... collected 7 items
+
+tests/test_supervisor.py::test_streams_lines_bigger_than_64k_and_cancels_gracefully 
+  lines=8 big_line_len=200000 how=graceful rc=143 elapsed=1.1s last={'type': 'system', 'subtype': 'sigterm_received'}
+PASSED
+tests/test_supervisor.py::test_hard_cancel_when_actor_ignores_sigterm 
+  how=hard rc=137 elapsed=5.1s ticks=24
+PASSED
+tests/test_supervisor.py::test_without_init_pid1_ignores_sigterm 
+  without --init: hard   with --init: graceful
+PASSED
+tests/test_supervisor.py::test_killing_only_the_docker_cli_orphans_the_container 
+  container alive after killpg(docker CLI): True; swept by label: 1
+PASSED
+tests/test_supervisor.py::test_sigterm_to_docker_cli_is_proxied 
+  rc=143 container alive=False
+PASSED
+tests/test_supervisor.py::test_default_64k_reader_limit_breaks_on_big_line 
+  default limit: ValueError: Separator is not found, and chunk exceed the limit
+PASSED
+tests/test_supervisor.py::test_real_claude_cancels_gracefully_while_retrying 
+  how=graceful rc=143 elapsed=19.8s events=[('system', 'init'), ('system', 'api_retry'), ('system', 'api_retry'), ('system', 'api_retry')]
+PASSED
+
+============================== 7 passed in 39.55s ==============================
+```
+
+What the tests establish:
+1. **Killing the `docker run` CLI does not kill the container.** `killpg(SIGKILL)` on the CLI (or the supervisor itself dying hard) leaves the container running (`test_killing_only_the_docker_cli_orphans_the_container`). `start_new_session=True` + `killpg` from the prior art is necessary for the local process tree but **not sufficient**. Hence: supervisor-chosen `--name`, a `--label`, cancellation via `docker stop`/`rm -f`, and a **startup orphan sweep by label** (reconcile against the event log's live runs).
+2. SIGTERM (not SIGKILL) to the CLI *is* proxied to the container (`--sig-proxy` default without `-t`) — a nice-to-have, not something to rely on.
+3. **`--init` is required.** Without it the actor is PID 1 and the kernel drops SIGTERM for PID 1 without a handler → every stop waits the full grace then SIGKILLs. With `--init` (tini) the same command stops immediately.
+4. Graceful path: `docker stop -t N` → SIGTERM → actor → exit 143. Hard path: actor ignores TERM → SIGKILL at N s → exit 137. Both leave no container (`--rm`).
+5. The 64 KiB asyncio default reader limit **does** raise (`ValueError: Separator is not found, and chunk exceed the limit`) on a 200 KB line — prior-art claim confirmed; `limit=` on `create_subprocess_exec` fixes it.
+6. **Real claude honours SIGTERM** (exit 143 well inside the 10 s grace) — but emits **no final `result` event** when terminated. The supervisor must synthesise the "cancelled" event itself; absence of `result` is the signal.
+
+What differs for real claude vs the stand-in (beyond the above):
+- Claude's own subprocesses (Bash tool children) are torn down with the container's PID namespace regardless of whether claude forwards the signal — container-level kill is the reliable tree kill, which is a real advantage over host-side `killpg`.
+- Cancelling mid-tool-call: side effects already written to rw mounts stay. Post-cancel audit (diff of declared output paths) should be recorded.
+- Session transcripts live in the tmpfs `$HOME` and vanish; stream-json captured by the supervisor is the only record (by design).
+- Useful stream-json events for supervision seen in this spike: `system/init` (tools, model, mcp_servers, permissionMode — record it), `system/api_retry` (`attempt`, `max_retries`, `error_status`, `error`: e.g. `authentication_failed`), final `result` (`is_error`, `result`, `total_cost_usd`).
+
 ## Q6
 PENDING
 ## Q7
