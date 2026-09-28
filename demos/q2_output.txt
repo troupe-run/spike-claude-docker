@@ -1,0 +1,39 @@
+host: SSH_AUTH_SOCK set? yes  ~/.ssh exists? yes  HOST_CANARY set? yes
+== whoami: uid=1000(actor) gid=1000(actor) groups=1000(actor)
+== env (names only):
+CLAUDE_CODE_DISABLE_AUTO_MEMORY CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC DISABLE_AUTOUPDATER HOME HOSTNAME PATH PWD SHLVL _ 
+ok: SSH_AUTH_SOCK unset
+ok: AWS_ACCESS_KEY_ID unset
+ok: ANTHROPIC_API_KEY unset
+ok: CLAUDE_CODE_OAUTH_TOKEN unset
+ok: HOST_CANARY unset
+absent: /Users
+absent: /home/actor/.ssh
+absent: /home/actor/.aws
+absent: /home/actor/.gnupg
+absent: /home/actor/.claude
+absent: /home/actor/.claude.json
+absent: /run/host-services/ssh-auth.sock
+absent: /var/run/docker.sock
+PRESENT: /root (drwx------ 2 root root 4096 Sep 18 00:00 /root)
+== mounts (non-proc/sys/dev):
+/ overlay ro,relatime,lowerdir=/var/lib/desktop-containerd/daemon/io.containerd.snapshotte
+/dev tmpfs rw,nosuid,size=65536k,mode=755
+/dev/shm tmpfs rw,nosuid,nodev,noexec,relatime,size=65536k
+/probe.sh virtiofs ro,nosuid,nodev,relatime,ignore_atime,no_xattr
+/tmp tmpfs rw,nosuid,nodev,noexec,relatime
+/workspace virtiofs rw,nosuid,nodev,relatime,ignore_atime,no_xattr
+/etc/hostname ext4 ro,relatime,discard
+/etc/hosts ext4 ro,relatime,discard
+/etc/resolv.conf ext4 ro,relatime,discard
+/home/actor tmpfs rw,nosuid,nodev,noexec,relatime,mode=755,uid=1000,gid=1000
+/proc/interrupts tmpfs rw,nosuid,size=65536k,mode=755
+/proc/kcore tmpfs rw,nosuid,size=65536k,mode=755
+/proc/keys tmpfs rw,nosuid,size=65536k,mode=755
+/proc/scsi tmpfs ro,relatime,size=4k,nr_inodes=1
+/proc/timer_list tmpfs rw,nosuid,size=65536k,mode=755
+/sys/firmware tmpfs ro,relatime,size=4k,nr_inodes=1
+== CapEff: 0000000000000000  NoNewPrivs: 1
+== write to / : touch: cannot touch '/evil': Read-only file system
+blocked
+== write to /workspace : ok
