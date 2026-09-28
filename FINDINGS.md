@@ -457,3 +457,13 @@ Plus Claude-level flags: `--setting-sources '' --strict-mcp-config` (or `--safe-
 - **Verified by running:** Q1 image; Q2 isolation; Q3 egress allow/deny/bypass/DNS incl. claude's own traffic via the proxy; Q4 ro/rw/nested mounts; Q5 supervisor + cancellation (stand-in and real claude), orphan pitfall, `--init`, 64 KiB; Q6 `--bare` behaviour (host + container), hostile-repo isolation matrix, CLAUDE.md inclusion via fake API; Q7 injection mechanics with bogus tokens, fake API, and injector sidecar.
 - **Not verified (need a real credential):** an actual model turn in the container (tool use, file writes by claude, permission behaviour, "blocked tools silently don't run"); which extra hosts OAuth-mode needs (token refresh/profile); OAuth token through the injector against the real API; SSE streaming through a production injector; `run_authenticated.sh` itself (deliberately not run).
 
+
+## Addendum 2026-09-28 — authenticated run (owner-run, real `setup-token` credential)
+
+`run_authenticated.sh` was run by the owner in their own terminal (token never entered the agent session).
+Result: **effect verified** — `out/hello.txt == hi`; `exit 0` plus the file check both pass. The egress proxy
+logged exactly **3 × `CONNECT api.anthropic.com:443`** and nothing else, so OAuth-token mode needed no extra
+hosts for this run (token refresh not exercised). Cost reported: $0.0298 (client-side estimate).
+Note: the run used the default model (`claude-sonnet-5`) — the bake-off must pass `--model` explicitly to pin.
+The init event listed the full tool set (Task, Bash, Edit, Cron*, worktree tools, …) — tool allowlisting
+must be explicit per actor.
