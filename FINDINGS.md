@@ -13,7 +13,7 @@ Status legend: yes / yes-with-caveats / no / needs-owner-input / PENDING
 | 4 | Write effects: RO inputs, RW declared output | **yes** |
 | 5 | asyncio supervisor, stream-json, cancel cleanly incl. container | **yes-with-caveats** (must target the container, not just the CLI) |
 | 6 | `--bare` and auth on host; settings/MCP/memory controls | **yes** — prior-art claim confirmed; and there are OAuth-compatible alternatives |
-| 7 | Auth inside container — options only | PENDING |
+| 7 | Auth inside container — options only | **needs-owner-input** (options measured with bogus tokens; recommendation below) |
 | 8 | Surprises / prior-art corrections | PENDING |
 
 ## Q1 — Image with Claude Code installed
@@ -309,8 +309,79 @@ Takeaways:
 
 Caveats: env var names were found by `strings` on the binary, not all are documented — treat undocumented ones as unstable. `--safe-mode`'s OAuth acceptance was shown with a bogus token reaching the network stage, not with a real login.
 
-## Q7
-PENDING
+## Q7 — Authentication inside the container (options only)
+
+**Answer: needs-owner-input.** No real credential was read, copied, printed or created; `claude setup-token` was not run. All mechanics below were measured with a **bogus token** against a **fake API endpoint** (`ANTHROPIC_BASE_URL` → `demos/fake_api.py`, which logs only a SHA-256 prefix of the auth header) so we could see what claude actually sends and what an in-container process can see.
+
+The key experimental result: **anything the actor process holds, the model's tools can reach.** Claude Code scrubs the token from its children's environment (good), but a child running as the same uid can still read `/proc/<claude>/environ`, `/proc/<claude>/fd/*` and even open `/proc/<claude>/mem` (Yama ptrace_scope is not enabled in the Docker Desktop VM; verified `child-open-parent-mem: ALLOWED`). So "not visible in `docker inspect`/`ps`" is achievable, but "not reachable by a prompt-injected actor" is only achievable by **keeping the credential out of the container**.
+
+### Measured (`demos/q7_injection.sh`, hook = stand-in for a Bash-tool child; `demos/q7_hook_probe.sh`)
+```
+### A) env var (-e CLAUDE_CODE_OAUTH_TOKEN; value from supervisor env, not argv)
+  docker inspect Env has token: 1
+  docker inspect Mounts: /probe_hook.sh:ro 
+  [child] own env has token: 0
+  [child] own inherited fds: 0->socket:[9936814] 1->/tmp/probe.txt 10->/probe_hook.sh 11->socket:[9936817] 2->socket:[9936819] 3->pipe:[9940481] 
+  [child] can read /proc/<claude>/environ token: 1
+  [child] claude's fds: 0->/dev/null 1->/dev/null 10->anon_inode:[eventfd] 11->anon_inode:[eventpoll] 12->anon_inode:[eventfd] 13->socket:[9936802] 14->anon_inode:inotify 19->socket:[9936816] 2->/dev/null 23->socket:[9936818] 25->anon_inode:[pidfd] 3->anon_inode:[eventpoll] 4->anon_inode:[eventfd] 5->/dev/urandom 6->/proc/8/statm 7->/dev/null 8->/dev/null 9->anon_inode:[eventpoll] 
+  [child] can read token via /proc/<claude>/fd/*: 0 fd(s)
+  [child] secret file /run/secrets/token readable: no/absent
+  fake API saw Bearer matching bogus token: 1 request(s)
+### B) secret file bind-mounted ro, wrapper opens it as fd 3, exports only the fd number
+  docker inspect Env has token: 0
+  docker inspect Mounts: /probe_hook.sh:ro /run/secrets/token: 
+  [child] own env has token: 0
+  [child] own inherited fds: 0->socket:[9940559] 1->/tmp/probe.txt 10->/probe_hook.sh 11->socket:[9940562] 2->socket:[9940564] 3->pipe:[9940568] 
+  [child] can read /proc/<claude>/environ token: 0
+  [child] claude's fds: 0->/dev/null 1->/dev/null 10->anon_inode:[eventpoll] 11->anon_inode:[eventfd] 12->anon_inode:[eventpoll] 13->anon_inode:[eventfd] 14->socket:[9940547] 16->anon_inode:inotify 2->/dev/null 20->socket:[9940561] 24->socket:[9940563] 26->anon_inode:[pidfd] 3->/run/secrets/token 4->anon_inode:[eventpoll] 5->anon_inode:[eventfd] 6->/dev/urandom 7->/proc/9/statm 8->/dev/null 9->/dev/null 
+  [child] can read token via /proc/<claude>/fd/*: 1 fd(s)
+  [child] secret file /run/secrets/token readable: YES
+  fake API saw Bearer matching bogus token: 1 request(s)
+### C) token piped on stdin of docker run -i; wrapper turns it into fd 3 (never on disk/env)
+  [child] own env has token: 0
+  [child] own inherited fds: 0->socket:[9941334] 1->/tmp/probe.txt 10->/probe_hook.sh 11->socket:[9941337] 2->socket:[9941339] 3->pipe:[9940659] 
+  [child] can read /proc/<claude>/environ token: 0
+  [child] claude's fds: 0->/dev/null 1->/dev/null 10->anon_inode:[eventpoll] 11->anon_inode:[eventfd] 12->anon_inode:[eventpoll] 13->anon_inode:[eventfd] 14->socket:[9941322] 16->anon_inode:inotify 2->/dev/null 20->socket:[9941336] 24->socket:[9941338] 26->anon_inode:[pidfd] 3->pipe:[9939798] 4->anon_inode:[eventpoll] 5->anon_inode:[eventfd] 6->/dev/urandom 7->/proc/9/statm 8->/dev/null 9->/dev/null 
+  [child] can read token via /proc/<claude>/fd/*: 0 fd(s)
+  [child] secret file /run/secrets/token readable: no/absent
+error: no such object: q7c-55485
+  docker inspect Env has token: 0
+  fake API saw Bearer matching bogus token: 1 request(s)
+```
+(For C, the `docker inspect` race — container already gone — is moot: option C passes no `-e` for the token by construction.)
+
+### Option D measured (`demos/q7d_auth_injector.sh`, `demos/auth_injector.py`)
+```
+"result":"Failed to authenticate. API Error: 401 fake api"
+actor can see real token anywhere in its fs/env: 0 files, env=0
+fake API saw injected REAL token: 1 request(s); saw actor's dummy: 0
+paths: "path": "/v1/messages 
+```
+
+### Options
+
+| | How injected | Visible in `docker inspect` / host `ps` | Reachable by actor's tools | Notes |
+|---|---|---|---|---|
+| **(a) `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`**, as env (`-e NAME`, value from supervisor env) | env | **inspect: yes** (even with `-e NAME` form); `ps`: no (if not `-e NAME=value`) | **yes** via `/proc/<claude>/environ` (children's own env is scrubbed) | Simplest. Long-lived (~1 yr) subscription token; revocable from claude.ai settings. Uses subscription quota. `--bare` refuses it (Q6) → use `--setting-sources '' --strict-mcp-config` / `--safe-mode` instead. |
+| (a') same token via **`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`**, fed through `docker run -i` stdin → wrapper → fd 3 (option C above) | stdin pipe | **no** / no | not via environ or fd (pipe drained); **yes via `/proc/<claude>/mem`** | Best in-container variant. Used by `run_authenticated.sh`. |
+| (b) **file-based credential** (mount a credentials file / secret file) | bind mount | path only | **yes** — the file itself (Docker Desktop ignores host perms, Q4) and claude keeps the fd open (option B above) | Host login lives in the **macOS Keychain**, not a file, so there is no `~/.claude/.credentials.json` to mount; extracting it from the keychain means handling the raw OAuth access+refresh tokens (short-lived access token, refresh writes back to a store the container can't persist to a read-only/ephemeral HOME). Awkward and the worst exposure. **Not recommended.** On Linux hosts `~/.claude/.credentials.json` exists but the same objections apply (refresh token in the sandbox). |
+| (c) **`ANTHROPIC_API_KEY`** (Console API key) | env, or `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR` (same stdin→fd trick), or `apiKeyHelper` in `--settings` | as (a)/(a') | same as (a)/(a') | Pay-per-token billing, org-level spend limits and per-key revocation; **works with `--bare`**. Cleanest fit for automation and for per-actor keys (one key per troupe / per actor for attribution and blast-radius). |
+| **(d) credential-injecting sidecar** (recommended target) | actor gets a **dummy** token + `ANTHROPIC_BASE_URL=http://authproxy:8080`; sidecar (only it mounts the secret) swaps the auth header and forwards to `https://api.anthropic.com` | **no** (actor container) | **no** — the real credential never enters the actor's namespace (measured: 0 files, env 0; API saw the injected token, never the dummy) | Works with either credential type. Adds one small service. The sidecar also *is* the Anthropic egress path, so it doubles as the audit point (token usage per run). The prototype here is HTTP-to-fake-API; production must forward over TLS and stream (SSE) without buffering. |
+
+Security trade-offs in one line each:
+- (a) env: simplest; token readable by the actor and in `docker inspect` (anyone with Docker socket access = anyone who could already own the box, but inspect output tends to end up in logs/bug reports).
+- (a') stdin→fd: keeps it out of inspect/ps/env/disk; still extractable by a malicious actor from process memory.
+- (b) file: worst of both; also fights the keychain.
+- (c) API key: better revocation/billing/`--bare` story; same in-container exposure as (a)/(a') unless combined with (d).
+- (d) injector: only option where a prompt-injected actor **cannot exfiltrate the credential** (it can still spend it, via the model call — bound that with budget caps at the injector).
+
+Open owner questions:
+1. Subscription token (a) vs Console API key (c)? Check current Anthropic terms for using a subscription `setup-token` for unattended automation of this kind before relying on it.
+2. Is (d) worth building for v1, or accept (a') for local single-user use and move to (d) before any multi-tenant/untrusted-repo use?
+3. OAuth-with-injector is **unverified against the real API** (only fake API). `run_authenticated.sh` (option a') is the first real-credential test; an injector variant against the real API would be the second.
+
+**`run_authenticated.sh`** (not run): expects `CLAUDE_CODE_OAUTH_TOKEN` in the environment; pipes it on stdin to an in-container wrapper → fd 3 → `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3`; full stage (internal network + allowlist proxy, RO root, tmpfs HOME, no caps, scratch workspace); asks claude to write `out/hello.txt` and then **checks the file** rather than trusting exit 0; prints proxy decisions so any extra host OAuth needs shows up as a refusal.
+
 ## Q8
 PENDING
 ## RECOMMENDATION
