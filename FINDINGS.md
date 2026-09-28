@@ -14,7 +14,7 @@ Status legend: yes / yes-with-caveats / no / needs-owner-input / PENDING
 | 5 | asyncio supervisor, stream-json, cancel cleanly incl. container | **yes-with-caveats** (must target the container, not just the CLI) |
 | 6 | `--bare` and auth on host; settings/MCP/memory controls | **yes** — prior-art claim confirmed; and there are OAuth-compatible alternatives |
 | 7 | Auth inside container — options only | **needs-owner-input** (options measured with bogus tokens; recommendation below) |
-| 8 | Surprises / prior-art corrections | PENDING |
+| 8 | Surprises / prior-art corrections | see below — prior art mostly right; `killpg` alone is insufficient |
 
 ## Q1 — Image with Claude Code installed
 
@@ -362,7 +362,7 @@ paths: "path": "/v1/messages
 
 | | How injected | Visible in `docker inspect` / host `ps` | Reachable by actor's tools | Notes |
 |---|---|---|---|---|
-| **(a) `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`**, as env (`-e NAME`, value from supervisor env) | env | **inspect: yes** (even with `-e NAME` form); `ps`: no (if not `-e NAME=value`) | **yes** via `/proc/<claude>/environ` (children's own env is scrubbed) | Simplest. Long-lived (~1 yr) subscription token; revocable from claude.ai settings. Uses subscription quota. `--bare` refuses it (Q6) → use `--setting-sources '' --strict-mcp-config` / `--safe-mode` instead. |
+| **(a) `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`**, as env (`-e NAME`, value from supervisor env) | env | **inspect: yes** (even with `-e NAME` form); `ps`: no (if not `-e NAME=value`) | **yes** via `/proc/<claude>/environ` (children's own env is scrubbed) | Simplest. Long-lived subscription token (exact validity/revocation path per Anthropic docs — not verified here). Uses subscription quota. `--bare` refuses it (Q6) → use `--setting-sources '' --strict-mcp-config` / `--safe-mode` instead. |
 | (a') same token via **`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`**, fed through `docker run -i` stdin → wrapper → fd 3 (option C above) | stdin pipe | **no** / no | not via environ or fd (pipe drained); **yes via `/proc/<claude>/mem`** | Best in-container variant. Used by `run_authenticated.sh`. |
 | (b) **file-based credential** (mount a credentials file / secret file) | bind mount | path only | **yes** — the file itself (Docker Desktop ignores host perms, Q4) and claude keeps the fd open (option B above) | Host login lives in the **macOS Keychain**, not a file, so there is no `~/.claude/.credentials.json` to mount; extracting it from the keychain means handling the raw OAuth access+refresh tokens (short-lived access token, refresh writes back to a store the container can't persist to a read-only/ephemeral HOME). Awkward and the worst exposure. **Not recommended.** On Linux hosts `~/.claude/.credentials.json` exists but the same objections apply (refresh token in the sandbox). |
 | (c) **`ANTHROPIC_API_KEY`** (Console API key) | env, or `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR` (same stdin→fd trick), or `apiKeyHelper` in `--settings` | as (a)/(a') | same as (a)/(a') | Pay-per-token billing, org-level spend limits and per-key revocation; **works with `--bare`**. Cleanest fit for automation and for per-actor keys (one key per troupe / per actor for attribution and blast-radius). |
@@ -382,7 +382,36 @@ Open owner questions:
 
 **`run_authenticated.sh`** (not run): expects `CLAUDE_CODE_OAUTH_TOKEN` in the environment; pipes it on stdin to an in-container wrapper → fd 3 → `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3`; full stage (internal network + allowlist proxy, RO root, tmpfs HOME, no caps, scratch workspace); asks claude to write `out/hello.txt` and then **checks the file** rather than trusting exit 0; prints proxy decisions so any extra host OAuth needs shows up as a refusal.
 
-## Q8
-PENDING
+## Q8 — Surprises, things that didn't work, prior-art corrections
+
+### Prior-art claims, verdicts
+| Claim | Verdict | Evidence |
+|---|---|---|
+| `--bare` stops repo `.claude/settings.json` hooks and `.mcp.json` servers | **Confirmed** (also stops CLAUDE.md) | Q6 matrix |
+| `--bare` "never reads OAuth credentials" | **Confirmed** — keychain login *and* `CLAUDE_CODE_OAUTH_TOKEN` both ignored ("Not logged in") | `--help` text; host run; container matrix |
+| Set `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` | **Confirmed exists** (in binary); `--bare` also disables auto-memory | Q6 |
+| Exit 0 is not evidence the work happened | **Confirmed, and worse**: failures report `"subtype": "success"` with `"is_error": true`. Check `is_error` + verify the effect | Q3/Q6 result events |
+| asyncio subprocess, `start_new_session=True`, `killpg` | **Necessary but NOT sufficient in Docker**: killing the `docker run` CLI orphans the container | `test_killing_only_the_docker_cli_orphans_the_container` |
+| Raise the 64 KiB stream reader limit | **Confirmed** (`ValueError` at default) | `test_default_64k_reader_limit_breaks_on_big_line` |
+| `--output-format stream-json --verbose` | **Confirmed** (stream-json requires `--verbose` in `-p`) | all demos |
+| Blocked tools silently don't run | **Not tested** (needs a real model turn). Mitigations exist: `--permission-prompts none` makes would-prompt tools deny deterministically; verify effects post-run | — |
+| *Implied*: `--bare` is the way to get the security control | **Refined**: `--safe-mode` or `--setting-sources '' --strict-mcp-config` give the same repo isolation *and* keep OAuth and the full tool set | Q6 |
+
+### Surprises
+1. **Auth failures and blocked egress look like hangs.** Default is 10 retries with exponential backoff (up to ~38 s per step): a bad key took **188 s** to fail. Set `CLAUDE_CODE_MAX_RETRIES` low (0–2) and/or have the supervisor abort on the `system/api_retry` event with `error: "authentication_failed"`. The retry events are nicely structured (`attempt`, `max_retries`, `retry_delay_ms`, `error_status`, `error`).
+2. **`--bare` cuts the toolset to `Bash, Edit, Read`** (no `Write`, `WebFetch`, `Task`, …) and `--tools` can't add them back. Not in `--help`. A coding actor under `--bare` can still create files via Bash/Edit, but it is a different agent than default claude.
+3. **Plain `claude -p` in a hostile repo runs its hooks and MCP servers, even ones self-approved by the repo's own `enableAllProjectMcpServers`.** `-p` skips the trust dialog. Never run plain `-p` on untrusted content.
+4. **Claude honours SIGTERM but emits no `result` event** when terminated — the supervisor must write the "cancelled" event.
+5. **PID 1 problem**: without `--init`, `docker stop` always takes the full grace period.
+6. **Docker Desktop ignores host file permissions on bind mounts** (container uid 1000 wrote into a host `0700` dir and read a host `0600` secret). `:ro` is the only write control; never mount secrets you don't want the actor to read.
+7. **Same-uid processes can read claude's `/proc/<pid>/environ`, open fds and memory** — any credential inside the actor container is reachable by the actor's tools. Claude does scrub the token from children's env, and keeps the `…_FILE_DESCRIPTOR` fd open for its lifetime.
+8. `--tmpfs` mounts are `noexec` by default on Docker Desktop — pass `exec` if actors run built binaries from `/tmp`.
+9. Variadic flags (`--add-dir`, `--tools`, `--allowedTools`, `--mcp-config`, …) swallow a following positional prompt → `Error: Input must be provided either through stdin or as a prompt argument`. Put the prompt immediately after `-p` (or pass it on stdin).
+10. **No `--max-turns` in 2.1.281** `--help`; `--max-budget-usd` exists (print mode). Budget is the available cap.
+11. Default model in a fresh container is `claude-opus-5-5[1m]` — pin `--model` per actor for cost predictability.
+12. Even with nonessential traffic enabled, the only extra egress was Datadog log intake; with it disabled, **only `api.anthropic.com`** — a very small allowlist (API-key mode; OAuth-mode refresh endpoints unverified).
+13. `docker images` reports 623 MB while layer content is ~453 MB (containerd image store accounting).
+14. The `system/init` event is rich (tools, mcp_servers with status, model, permissionMode, apiKeySource, plugins, skills, claude_code_version) — worth recording as the first event of every run for auditability.
+
 ## RECOMMENDATION
 PENDING
